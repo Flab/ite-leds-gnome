@@ -1,0 +1,134 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 Fabio Gagliardi
+"""Control the ITE keyboard backlight (048d:600b) and chassis lightbar (048d:7001).
+
+    ite-leds apply            apply the saved state
+    ite-leds get              print the saved state
+    ite-leds set KEY VALUE    save one value and apply it
+
+The state lives in /etc/ite-leds.conf (KEY=VALUE lines). It is validated
+strictly because the boot service reads it as root: nothing in it is ever
+executed or used as a path.
+"""
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+CONF = os.environ.get("ITE_LEDS_CONF", "/etc/ite-leds.conf")
+CTL = os.environ.get("ITE_CTL") or shutil.which("ite8291r3-ctl")
+BAR = "/sys/class/leds/rgb:lightbar"
+KB_USB_ID = "048d:600b"
+
+RGB = re.compile(r"^(\d{1,3}),(\d{1,3}),(\d{1,3})$")
+SPEC = {
+    "kb_on": ("^[01]$", "1"),
+    "kb_rgb": (RGB, "255,255,255"),
+    "kb_brightness": ("^([0-9]|[1-4][0-9]|50)?$", ""),  # empty: leave the controller value
+    "bar_on": ("^[01]$", "0"),
+    "bar_rgb": (RGB, "255,255,255"),
+    "bar_brightness": ("^([0-9]|[1-9][0-9]|100)$", "50"),
+}
+
+
+def valid(key, value):
+    pattern = SPEC[key][0]
+    m = re.match(pattern, value) if isinstance(pattern, str) else pattern.match(value)
+    if not m:
+        return False
+    return all(int(g) <= 255 for g in m.groups()) if pattern is RGB else True
+
+
+def load():
+    state = {k: v[1] for k, v in SPEC.items()}
+    try:
+        with open(CONF) as f:
+            for line in f:
+                key, sep, value = line.strip().partition("=")
+                if sep and key in SPEC and valid(key, value):
+                    state[key] = value
+    except FileNotFoundError:
+        pass
+    return state
+
+
+def save(state):
+    with open(CONF, "w") as f:
+        f.write("# managed by ite-leds\n")
+        for key in SPEC:
+            f.write(f"{key}={state[key]}\n")
+
+
+def kb_device():
+    out = subprocess.run(["lsusb", "-d", KB_USB_ID], capture_output=True, text=True).stdout
+    m = re.search(r"Bus (\d+) Device (\d+)", out)
+    return f"{int(m.group(1))}/{int(m.group(2))}" if m else None
+
+
+def apply_keyboard(state):
+    if not CTL:
+        print("ite8291r3-ctl not found, keyboard skipped", file=sys.stderr)
+        return
+    dev = None
+    for _ in range(20):
+        dev = kb_device()
+        if dev:
+            break
+        time.sleep(0.5)
+    if not dev:
+        print("keyboard controller not found", file=sys.stderr)
+        return
+    base = [CTL, "--device", dev]
+    if state["kb_on"] == "1":
+        cmd = base + ["monocolor", "--rgb", state["kb_rgb"]]
+        if state["kb_brightness"]:
+            cmd += ["-b", state["kb_brightness"]]
+    else:
+        cmd = base + ["off"]
+    subprocess.run(cmd, check=False)
+
+
+def apply_bar(state):
+    for _ in range(20):
+        if os.path.exists(f"{BAR}/brightness"):
+            break
+        time.sleep(0.5)
+    else:
+        print("lightbar LED not found, skipped", file=sys.stderr)
+        return
+    r, g, b = state["bar_rgb"].split(",")
+    brightness = state["bar_brightness"] if state["bar_on"] == "1" else "0"
+    with open(f"{BAR}/multi_intensity", "w") as f:
+        f.write(f"{r} {g} {b}")
+    with open(f"{BAR}/brightness", "w") as f:
+        f.write(brightness)
+
+
+def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    state = load()
+    if cmd == "get":
+        for key in SPEC:
+            print(f"{key}={state[key]}")
+    elif cmd == "apply":
+        apply_keyboard(state)
+        apply_bar(state)
+    elif cmd == "set" and len(argv) == 4 and argv[2] in SPEC:
+        key, value = argv[2], argv[3]
+        if not valid(key, value):
+            print(f"invalid value for {key}: {value}", file=sys.stderr)
+            return 2
+        state[key] = value
+        save(state)
+        (apply_keyboard if key.startswith("kb_") else apply_bar)(state)
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

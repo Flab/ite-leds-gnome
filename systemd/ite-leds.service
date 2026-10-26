@@ -1,0 +1,13 @@
+[Unit]
+Description=Apply keyboard backlight and lightbar state
+After=systemd-modules-load.service local-fs.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=ITE_CTL=@ITE_CTL@
+ExecStart=/usr/local/sbin/ite-leds apply
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,7 @@
+{
+  "uuid": "ite-leds@local",
+  "name": "ITE LEDs",
+  "description": "Quick Settings toggles for the ITE keyboard backlight and chassis lightbar, through the ite-leds command.",
+  "shell-version": ["50"],
+  "version": 1
+}
